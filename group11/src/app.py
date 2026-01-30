@@ -1,19 +1,21 @@
 """
 Book Recommendation app - runs main.ipynb logic with Streamlit UI.
 Minimal changes from the notebook; only pivot column fix and Streamlit inputs/output.
+Heavy imports are done in main() so missing deps show an error instead of a blank screen.
 """
 import os
-import pandas as pd
-import numpy as np
 import streamlit as st
-from sklearn.metrics import mean_squared_error
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
-from difflib import SequenceMatcher
 
-# ---- Paths (work when run from group11 or from src) ----
+# ---- Paths: resolve relative to this file so it works locally and on Streamlit Cloud ----
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATASET = os.path.join(BASE, "..", "Dataset")
+# Primary: Dataset is group11/Dataset when this file is group11/src/app.py
+DATASET = os.path.normpath(os.path.join(BASE, "..", "Dataset"))
+# Fallbacks when Streamlit runs from repo root with different cwd
+if not os.path.isfile(os.path.join(DATASET, "Books.csv")):
+    for candidate in [os.path.join(os.getcwd(), "group11", "Dataset"), os.path.join(os.getcwd(), "Dataset")]:
+        if os.path.isfile(os.path.join(candidate, "Books.csv")):
+            DATASET = os.path.normpath(candidate)
+            break
 BOOKS_PATH = os.path.join(DATASET, "Books.csv")
 RATINGS_PATH = os.path.join(DATASET, "Ratings.csv")
 USERS_PATH = os.path.join(DATASET, "Users.csv")
@@ -22,8 +24,15 @@ USERS_PATH = os.path.join(DATASET, "Users.csv")
 @st.cache_data
 def load_and_preprocess():
     """Notebook cells 2–4: load and preprocess."""
+    if not os.path.isfile(BOOKS_PATH):
+        raise FileNotFoundError(
+            f"Dataset not found at {BOOKS_PATH}. "
+            "On Streamlit Cloud: commit the group11/Dataset folder and set 'App directory' to group11."
+        )
     books = pd.read_csv(BOOKS_PATH, dtype={"Year-Of-Publication": object})
-    ratings = pd.read_csv(RATINGS_PATH)
+    # On Streamlit Cloud (limited RAM), load a sample of ratings so the app doesn't OOM
+    ratings_max_rows = 80_000 if os.environ.get("STREAMLIT_SERVER_HEADLESS") else None
+    ratings = pd.read_csv(RATINGS_PATH, nrows=ratings_max_rows)
     users = pd.read_csv(USERS_PATH)
 
     books["Year-Of-Publication"] = pd.to_numeric(books["Year-Of-Publication"], errors="coerce").fillna(0).astype(int)
@@ -117,7 +126,47 @@ def main():
     st.set_page_config(page_title="Book Recommendations", page_icon="📚")
     st.title("📚 Book Recommendation Engine")
 
-    books, ratings, users, deduped_ratings, ratings_for_rec, train, test = load_and_preprocess()
+    # Defer heavy imports so missing deps show an error instead of a blank screen on deploy
+    try:
+        import pandas as pd
+        import numpy as np
+        from sklearn.metrics.pairwise import cosine_similarity
+        from sklearn.model_selection import train_test_split
+        from difflib import SequenceMatcher
+        import sys
+        mod = sys.modules[__name__]
+        mod.pd = pd
+        mod.np = np
+        mod.cosine_similarity = cosine_similarity
+        mod.train_test_split = train_test_split
+        mod.SequenceMatcher = SequenceMatcher
+    except ImportError as e:
+        st.error("Missing dependency: " + str(e))
+        st.info("Add a **requirements.txt** in the repo root with: `pandas`, `numpy`, `scikit-learn`, `streamlit`")
+        return
+
+    try:
+        with st.spinner("Loading data…"):
+            books, ratings, users, deduped_ratings, ratings_for_rec, train, test = load_and_preprocess()
+    except FileNotFoundError as e:
+        st.error(str(e))
+        with st.expander("Debug (for Streamlit Cloud)"):
+            st.code(f"cwd: {os.getcwd()}\nDATASET: {DATASET}\nBOOKS_PATH: {BOOKS_PATH}\nexists: {os.path.isfile(BOOKS_PATH)}")
+        st.info(
+            "**Deploying on Streamlit Cloud?**\n\n"
+            "1. **Main file path:** `group11/src/app.py`\n"
+            "2. **Advanced → App directory:** `group11`\n"
+            "3. **Commit the Dataset:** Ensure `group11/Dataset/` (Books.csv, Ratings.csv, Users.csv) is in your repo. "
+            "If the CSVs are large, run `git status` and `git add group11/Dataset/` then push."
+        )
+        return
+    except Exception as e:
+        st.error("Something went wrong loading the app.")
+        with st.expander("Error details (share this if you need help)"):
+            st.exception(e)
+            st.code(f"cwd: {os.getcwd()}\nBOOKS_PATH: {BOOKS_PATH}\nexists: {os.path.isfile(BOOKS_PATH)}")
+        return
+
     if len(ratings_for_rec) < len(deduped_ratings):
         st.caption(f"Using a sample of {len(ratings_for_rec):,} ratings for fast recommendations.")
 

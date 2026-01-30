@@ -12,15 +12,14 @@ streamlit run src/app.py
 
 Open http://localhost:8501 in your browser.
 
-## Host on your portfolio
+## Host on Streamlit Cloud
 
-- **Streamlit Community Cloud** (free): Push this repo to GitHub, then at [share.streamlit.io](https://share.streamlit.io) deploy with:
-  - Repo: `your-username/Book-Recommendation`
-  - Branch: `main`
-  - Main file: `group11/src/app.py`
-  - App directory: leave empty or `group11` (so working directory has `group11/Dataset/`).
-
-- **Other hosts**: Run `streamlit run src/app.py` with working directory `group11` so `src/app.py` and `Dataset/` are found.
+1. Push the repo to GitHub (ensure `group11/Dataset/` with Books.csv, Ratings.csv, Users.csv is committed).
+2. At [share.streamlit.io](https://share.streamlit.io): **New app** → connect repo → set:
+   - **Main file path:** `group11/src/app.py`
+   - **Advanced settings → App directory:** `group11`
+3. Deploy. The app uses a sample of ratings on Streamlit Cloud to stay within memory limits.
+4. If the app shows "Dataset not found", open the **Debug** expander to see paths and cwd, and confirm the Dataset folder is in the repo and App directory is `group11`.
 
 ## Modes
 

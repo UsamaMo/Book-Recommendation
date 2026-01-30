@@ -1,0 +1,5 @@
+# For Streamlit Cloud: repo root requirements (app is group11/src/app.py)
+pandas>=1.5.0
+numpy>=1.21.0
+scikit-learn>=1.0.0
+streamlit>=1.28.0
