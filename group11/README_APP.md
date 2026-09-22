@@ -1,27 +1,14 @@
-# Book Recommendation UI
+# Book Recommendation App
 
-Web UI for the book recommendation engine (content-based + collaborative filtering). No hardcoded users or preferences.
+See the [root README](../README.md) for setup and deployment.
 
-## Run locally
+From the repository root:
 
 ```bash
-cd group11
 pip install -r requirements.txt
-streamlit run src/app.py
+streamlit run group11/src/app.py
 ```
 
-Open http://localhost:8501 in your browser.
+The page starts with popular books. Choose favorite books or authors and click **Get recommendations** to get a list with covers, ratings, and a short explanation. Results stay visible until you request a new list. The optional dataset reader selector is under **Advanced**.
 
-## Host on Streamlit Cloud
-
-1. Push the repo to GitHub (ensure `group11/Dataset/` with Books.csv, Ratings.csv, Users.csv is committed).
-2. At [share.streamlit.io](https://share.streamlit.io): **New app** → connect repo → set:
-   - **Main file path:** `group11/src/app.py`
-   - **Advanced settings → App directory:** `group11`
-3. Deploy. The app uses a sample of ratings on Streamlit Cloud to stay within memory limits.
-4. If the app shows "Dataset not found", open the **Debug** expander to see paths and cwd, and confirm the Dataset folder is in the repo and App directory is `group11`.
-
-## Modes
-
-1. **By my preferences** – Choose favorite authors and books; get content-based recommendations.
-2. **By a user in the dataset** – Pick a demo user (with 5+ ratings); get hybrid (collaborative + content-based) recommendations.
+Use **Already read** to replace a book and hide it (including editions with the same title) from future recommendations during the current session.

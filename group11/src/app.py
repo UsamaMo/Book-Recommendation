@@ -1,201 +1,166 @@
-"""
-Book Recommendation app - runs main.ipynb logic with Streamlit UI.
-Minimal changes from the notebook; only pivot column fix and Streamlit inputs/output.
-Heavy imports are done in main() so missing deps show an error instead of a blank screen.
-"""
-import os
+"""Simple Streamlit interface for book recommendations."""
+from pathlib import Path
+import sys
+import hashlib
+import importlib
+import re
+from urllib.parse import urlsplit
+
 import streamlit as st
 
-# ---- Paths: resolve relative to this file so it works locally and on Streamlit Cloud ----
-BASE = os.path.dirname(os.path.abspath(__file__))
-# Primary: Dataset is group11/Dataset when this file is group11/src/app.py
-DATASET = os.path.normpath(os.path.join(BASE, "..", "Dataset"))
-# Fallbacks when Streamlit runs from repo root with different cwd
-if not os.path.isfile(os.path.join(DATASET, "Books.csv")):
-    for candidate in [os.path.join(os.getcwd(), "group11", "Dataset"), os.path.join(os.getcwd(), "Dataset")]:
-        if os.path.isfile(os.path.join(candidate, "Books.csv")):
-            DATASET = os.path.normpath(candidate)
-            break
-BOOKS_PATH = os.path.join(DATASET, "Books.csv")
-RATINGS_PATH = os.path.join(DATASET, "Ratings.csv")
-USERS_PATH = os.path.join(DATASET, "Users.csv")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import recommender
 
 
-@st.cache_data
-def load_and_preprocess():
-    """Notebook cells 2–4: load and preprocess."""
-    if not os.path.isfile(BOOKS_PATH):
-        raise FileNotFoundError(
-            f"Dataset not found at {BOOKS_PATH}. "
-            "On Streamlit Cloud: commit the group11/Dataset folder and set 'App directory' to group11."
-        )
-    books = pd.read_csv(BOOKS_PATH, dtype={"Year-Of-Publication": object})
-    # On Streamlit Cloud (limited RAM), load a sample of ratings so the app doesn't OOM
-    ratings_max_rows = 80_000 if os.environ.get("STREAMLIT_SERVER_HEADLESS") else None
-    ratings = pd.read_csv(RATINGS_PATH, nrows=ratings_max_rows)
-    users = pd.read_csv(USERS_PATH)
-
-    books["Year-Of-Publication"] = pd.to_numeric(books["Year-Of-Publication"], errors="coerce").fillna(0).astype(int)
-    books.drop(["Image-URL-S", "Image-URL-M", "Image-URL-L"], axis=1, inplace=True)
-
-    ratings["Book-Rating"] = pd.to_numeric(ratings["Book-Rating"], errors="coerce")
-
-    users["Age"] = pd.to_numeric(users["Age"], errors="coerce").fillna(users["Age"].median())
-    users["Age"] = users["Age"].clip(lower=10, upper=100).astype(int)
-
-    deduped_ratings = ratings.drop_duplicates(["User-ID", "ISBN"])
-    train, test = train_test_split(deduped_ratings, test_size=0.2, random_state=42)
-
-    # Use a sample so pivot in collab_recommendations stays feasible (notebook logic unchanged)
-    n_sample = min(15_000, len(deduped_ratings))
-    ratings_for_rec = deduped_ratings.sample(n=n_sample, random_state=42) if len(deduped_ratings) > n_sample else deduped_ratings
-
-    return books, ratings, users, deduped_ratings, ratings_for_rec, train, test
+@st.cache_resource(show_spinner=False, max_entries=1)
+def build_engine(source_version):
+    # Reload only on a cache miss, so code changes cannot reuse an older class.
+    module = importlib.reload(recommender)
+    books, ratings = module.load_data()
+    return module.RecommendationEngine(books, ratings)
 
 
-# ---- Notebook: pivot_ratings (only fix: CSV has 'Book-Rating' not 'Rating') ----
-def pivot_ratings(ratings):
-    return ratings.pivot(index="User-ID", columns="ISBN", values="Book-Rating").fillna(0)
+def get_engine():
+    source = Path(recommender.__file__).read_bytes()
+    return build_engine(hashlib.sha256(source).hexdigest())
 
 
-# ---- Notebook: book_similarity ----
-def book_similarity(title1, title2):
-    return SequenceMatcher(None, title1, title2).ratio()
+def mark_read(isbn):
+    read_books = set(st.session_state.get("read_books", ()))
+    read_books.add(isbn)
+    # Reuse the displayed list's preferences, not unsubmitted form edits.
+    favorites, authors, user_id, n = st.session_state.get(
+        "submitted_preferences", ((), (), None, 5)
+    )
+    results = get_engine().recommend(
+        favorites, authors, user_id, n=n, exclude_isbns=read_books
+    )
+    st.session_state["read_books"] = read_books
+    st.session_state["results"] = results
 
 
-# ---- Notebook: content_based_recommendations ----
-def content_based_recommendations(user_preferences, books, n_recs=5):
-    favorite_authors = user_preferences.get("favorite_authors", [])
-    auth_books = books[books["Book-Author"].isin(favorite_authors)]
-
-    favorite_books = user_preferences.get("favorite_books", [])
-    similar_books = []
-    for book in favorite_books:
-        similarities = books.apply(lambda x: book_similarity(x["Book-Title"], book), axis=1)
-        similar_book = books.loc[similarities.idxmax()]
-        similar_books.append(similar_book)
-
-    recs = pd.concat([auth_books, pd.DataFrame(similar_books)], ignore_index=True)
-    return recs[:n_recs]
-
-
-# ---- Notebook: collab_recommendations (only fix: books index is not ISBN, so filter by ISBN) ----
-def collab_recommendations(user_id, ratings, books, n_recs=5):
-    user_ratings = ratings[ratings["User-ID"] == user_id]
-    other_ratings = ratings[ratings["User-ID"] != user_id]
-    if user_ratings.empty or other_ratings.empty:
-        return books.head(0)
-    user_book_matrix = pivot_ratings(user_ratings)
-    other_book_matrix = pivot_ratings(other_ratings)
-    similarities = cosine_similarity(user_book_matrix, other_book_matrix)
-
-    similar_users = np.argsort(similarities)[-1:-6:-1]
-
-    top_books = {}
-    for user in similar_users:
-        other_user_books = other_book_matrix.iloc[user]
-        for i, rating in other_user_books.iteritems():
-            if i not in user_book_matrix.columns:
-                if i not in top_books or top_books[i] < rating:
-                    top_books[i] = rating
-
-    isbns = list(top_books.keys())[:n_recs]
-    return books[books["ISBN"].isin(isbns)].head(n_recs)
+def cover_url(book, engine):
+    # Saved recommendations can predate the addition of cover URLs.
+    isbn = str(book.get("ISBN", "")).strip()
+    index = engine.isbn_index.get_indexer([isbn])[0]
+    sources = [book.get("Image-URL-M", "")]
+    if index >= 0:
+        sources.append(engine.books.iloc[index].get("Image-URL-M", ""))
+    for source in sources:
+        url = str(source).strip()
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+        except ValueError:
+            continue
+        url = url.replace("http://", "https://", 1)
+        if parsed.hostname == "images.amazon.com":
+            url = url.replace("https://images.amazon.com/", "https://images-na.ssl-images-amazon.com/", 1)
+        return url
+    if re.fullmatch(r"(?:[0-9]{9}[0-9Xx]|[0-9]{13})", isbn):
+        return f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg"
+    return None
 
 
-# ---- Notebook: hybrid_recommendations ----
-def hybrid_recommendations(user_id, user_prefs, ratings, books, n=5):
-    user_ratings = ratings[ratings["User-ID"] == user_id]
-
-    if len(user_ratings) >= 10:
-        cf_recs = collab_recommendations(user_id, ratings, books, n // 2)
-        cb_recs = content_based_recommendations(user_prefs, books, n // 2)
-        return pd.concat([cf_recs, cb_recs]).head(n)
-
-    elif len(user_ratings) >= 5:
-        cf_recs = collab_recommendations(user_id, ratings, books, n * 2 // 3)
-        cb_recs = content_based_recommendations(user_prefs, books, n // 3)
-        return pd.concat([cf_recs, cb_recs]).head(n)
-
-    else:
-        return content_based_recommendations(user_prefs, books, n)
-
-
-# ---- Streamlit UI ----
 def main():
     st.set_page_config(page_title="Book Recommendations", page_icon="📚")
-    st.title("📚 Book Recommendation Engine")
-
-    # Defer heavy imports so missing deps show an error instead of a blank screen on deploy
-    try:
-        import pandas as pd
-        import numpy as np
-        from sklearn.metrics.pairwise import cosine_similarity
-        from sklearn.model_selection import train_test_split
-        from difflib import SequenceMatcher
-        import sys
-        mod = sys.modules[__name__]
-        mod.pd = pd
-        mod.np = np
-        mod.cosine_similarity = cosine_similarity
-        mod.train_test_split = train_test_split
-        mod.SequenceMatcher = SequenceMatcher
-    except ImportError as e:
-        st.error("Missing dependency: " + str(e))
-        st.info("Add a **requirements.txt** in the repo root with: `pandas`, `numpy`, `scikit-learn`, `streamlit`")
-        return
+    st.title("Book Recommendation Engine")
+    st.write("Choose your favorite books or authors to get recommendations.")
 
     try:
-        with st.spinner("Loading data…"):
-            books, ratings, users, deduped_ratings, ratings_for_rec, train, test = load_and_preprocess()
-    except FileNotFoundError as e:
-        st.error(str(e))
-        with st.expander("Debug (for Streamlit Cloud)"):
-            st.code(f"cwd: {os.getcwd()}\nDATASET: {DATASET}\nBOOKS_PATH: {BOOKS_PATH}\nexists: {os.path.isfile(BOOKS_PATH)}")
-        st.info(
-            "**Deploying on Streamlit Cloud?**\n\n"
-            "1. **Main file path:** `group11/src/app.py`\n"
-            "2. **Advanced → App directory:** `group11`\n"
-            "3. **Commit the Dataset:** Ensure `group11/Dataset/` (Books.csv, Ratings.csv, Users.csv) is in your repo. "
-            "If the CSVs are large, run `git status` and `git add group11/Dataset/` then push."
-        )
-        return
-    except Exception as e:
-        st.error("Something went wrong loading the app.")
-        with st.expander("Error details (share this if you need help)"):
-            st.exception(e)
-            st.code(f"cwd: {os.getcwd()}\nBOOKS_PATH: {BOOKS_PATH}\nexists: {os.path.isfile(BOOKS_PATH)}")
-        return
+        with st.spinner("Loading books…"):
+            engine = get_engine()
+    except (FileNotFoundError, ValueError) as exc:
+        st.error(f"Could not load the dataset: {exc}")
+        st.stop()
 
-    if len(ratings_for_rec) < len(deduped_ratings):
-        st.caption(f"Using a sample of {len(ratings_for_rec):,} ratings for fast recommendations.")
+    query = st.text_input("Search books or authors", placeholder="Enter a title or author", key="search")
+    matches = engine.search(query, limit=100)
+    labels = {row["ISBN"]: f'{row["Book-Title"]} — {row["Book-Author"]}' for _, row in matches.iterrows()}
+    # Preserve selected books when the search changes.
+    for isbn in st.session_state.get("favorites", []):
+        index = engine.isbn_index.get_indexer([isbn])[0]
+        if index >= 0:
+            row = engine.books.iloc[index]
+            labels[isbn] = f'{row["Book-Title"]} — {row["Book-Author"]}'
 
-    # User ID: only IDs present in the sample used for recommendations
-    user_ids = sorted(ratings_for_rec["User-ID"].unique())
-    user_id = st.selectbox("User ID", options=user_ids, format_func=lambda x: f"{x}")
+    favorites = st.multiselect("Favorite books", list(labels), format_func=labels.get, key="favorites")
+    authors = st.multiselect(
+        "Favorite authors",
+        sorted(set(matches["Book-Author"]) | set(st.session_state.get("authors", []))),
+        key="authors",
+    )
+    if query and matches.empty:
+        st.info("No matches found. Try a different title or author.")
+    st.caption("Search to narrow the choices. Up to 100 matching books are shown.")
 
-    # Preferences: choices from data (cap list size for responsive UI)
-    authors = sorted(books["Book-Author"].dropna().unique().tolist())[:3000]
-    titles = sorted(books["Book-Title"].dropna().unique().tolist(), key=str.lower)[:5000]
+    user_id = None
+    with st.expander("Advanced"):
+        if st.checkbox("Use a reader from the dataset", key="use_reader"):
+            user_id = st.selectbox("User ID", engine.user_index.tolist(), key="user_id")
 
-    favorite_authors = st.multiselect("Favorite authors", options=authors, default=[])
-    favorite_books = st.multiselect("Favorite books (titles)", options=titles, default=[])
-
-    n_recs = st.slider("Number of recommendations", 5, 20, 5)
-
-    if st.button("Get recommendations"):
-        if not favorite_authors and not favorite_books:
-            st.warning("Pick at least one favorite author or book so we can recommend.")
+    n = st.slider("Number of recommendations", 5, 20, 5)
+    preferences = (tuple(favorites), tuple(authors), user_id, n)
+    if st.button("Get recommendations", type="primary"):
+        if not favorites and not authors and user_id is None:
+            st.warning("Choose at least one book, author, or reader.")
         else:
-            user_preferences = {
-                "favorite_authors": favorite_authors,
-                "favorite_books": favorite_books,
-            }
-            recommended_books = hybrid_recommendations(
-                user_id, user_preferences, ratings_for_rec, books, n=n_recs
-            )
-            st.subheader("Recommended books")
-            st.dataframe(recommended_books, use_container_width=True)
+            with st.spinner("Finding recommendations…"):
+                st.session_state["results"] = engine.recommend(
+                    favorites, authors, user_id, n=n,
+                    exclude_isbns=st.session_state.get("read_books", ()),
+                )
+                st.session_state["submitted_preferences"] = preferences
+
+    personalized = "submitted_preferences" in st.session_state
+    if "results" not in st.session_state:
+        st.session_state["results"] = engine.recommend(
+            n=5, exclude_isbns=st.session_state.get("read_books", ())
+        )
+
+    st.subheader("Recommended books" if personalized else "Popular books")
+    if personalized and preferences != st.session_state["submitted_preferences"]:
+        st.caption("Preferences changed. Click Get recommendations to update this list.")
+    elif not personalized:
+        st.caption("Highly rated books to get you started. Choose your favorites above for personal recommendations.")
+
+    if st.session_state.get("read_books"):
+        st.caption(f"Already read: {len(st.session_state['read_books'])} books hidden for this session.")
+
+    results = st.session_state["results"]
+    if results.empty:
+        st.info("No recommendations found. Try different preferences.")
+    else:
+        for _, book in results.iterrows():
+            cover, details = st.columns([1, 5])
+            with cover:
+                url = cover_url(book, engine)
+                if url:
+                    st.image(url, width=85)
+                else:
+                    st.caption("Cover unavailable")
+            with details:
+                st.write(book["Book-Title"])
+                year = int(book["Year-Of-Publication"])
+                st.caption(f'{book["Book-Author"]} · {year}' if 1450 <= year <= 2100 else book["Book-Author"])
+                count = int(book["rating_count"])
+                st.write(f'{book["rating"]:.1f} / 10 · {count:,} ratings' if count else "Not yet rated")
+                reasons = {
+                    "Community favorite": "Highly rated by the reading community.",
+                    "Readers with similar taste": "Readers with similar ratings also rated this book.",
+                    "Similar title & author metadata": "Its title or author overlaps with books you like.",
+                    "From an author you love": "Written by one of your selected authors.",
+                    "Explore the catalog": "Another book to explore from the catalog.",
+                }
+                st.caption("Why this book? " + reasons.get(book["reason"], book["reason"]))
+                st.button(
+                    "Already read", key=f"read_{book['ISBN']}",
+                    on_click=mark_read, args=(book["ISBN"],),
+                    help="Hide this book and suggest another. Remembered for this session.",
+                )
+            st.divider()
+        st.caption("Ratings are out of 10. Covers use the dataset’s image hosts or [Open Library](https://openlibrary.org). Some editions may not have a cover.")
 
 
 if __name__ == "__main__":
