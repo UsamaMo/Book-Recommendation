@@ -18,5 +18,3 @@ For `group11/src/main.ipynb`, install `ipykernel` in the same environment and se
 ## Streamlit Cloud
 
 Push your changes to the branch connected to your Streamlit app. Use `group11/src/app.py` as the main file. Python 3.13 was tested locally. Keep the dataset CSVs and root `requirements.txt` in the repository.
-
-Existing app: https://book-recommendation01.streamlit.app/
